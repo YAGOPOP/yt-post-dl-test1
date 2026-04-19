@@ -1,6 +1,10 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let initial_post_url = inquire::Text::new("A:").prompt()?;
 
+    // let client = reqwest::blocking::Client::builder()
+    // .use_rustls_tls()
+    // .build()?;
+
     let initial_post_url = "https://www.youtube.com/post/Ugkx4cdNJgZPYbhSLRehjUHywEwBNlpn7A_f?lc=UgyEejCqC_ilo-zLj_N4AaABAg&si=T7DNr0-442WYtlKS" ;
 
     let mut post_url = url::Url::parse(&initial_post_url)?;
