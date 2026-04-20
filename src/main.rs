@@ -1,68 +1,123 @@
-// #[tokio::main]
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // lешгet initial_post_url = inquire::Text::new("A:").prompt()?;
+use std::io::BufRead;
 
-    let src_file = rfd::FileDialog::new()
-        .set_title("Выберите файл с ссылками")
-        .pick_file()
-        .ok_or("Ошибка выбора файла")?;
+// use std::str::FromStr;
+use chrono;
 
-    let contents = std::fs::read_to_string(src_file)?;
+use reqwest::{Client, header};
+use url::Url;
 
-    for (i, link) in contents.split("\n").enumerate() {
-        if link.is_empty() {
-            continue;
-        }
-        println!("{}", link);
+type ResultAsyncDyn<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-        let initial_post_url = link;
+#[tokio::main]
+async fn main() -> ResultAsyncDyn<()> {
+    let client = Client::builder().tls_backend_native().build()?;
 
-        let mut post_url = url::Url::parse(&initial_post_url)?;
-        post_url.set_query(None);
+    let write_dir = std::path::PathBuf::from("./obtained");
 
-        let resp_text = reqwest::blocking::get(post_url)?.text()?;
+    let mut handles = Vec::new();
+    for link in obtain_links()? {
+        handles.push(tokio::spawn({
+            file_from_indirect_url_own(link, client.clone(), write_dir.clone())
+        }));
+    }
 
-        let needle = r#"<meta property="og:image" content=""#;
-        let start = resp_text.find(needle).ok_or("og:image not found")? + needle.len();
-        let rest = &resp_text[start..];
-        let end = rest.find("=s").ok_or("FOUND INVALID OG IMAGE ADDRESS")?;
-
-        let final_img_url = format!("{}0", &rest[..(end + 2)]);
-
-        println!("{}", final_img_url);
-
-        let img_resp = reqwest::blocking::get(&final_img_url)?;
-        let resp_bytes = img_resp.bytes()?;
-
-        match std::fs::create_dir("obtained") {
-            Ok(_) => println!("Создана директория {}", "obtained"),
-            Err(e) => eprintln!("Директория наверное уже существует: {}", e),
-        }
-
-        std::fs::write(format!("obtained/image{}.jpg", i), &resp_bytes)?;
+    for handle in handles {
+        handle.await??;
     }
 
     Ok(())
 }
 
-async fn get_img_url_from_post_url(
-    client: &reqwest::Client,
-    post_url: &url::Url,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let resp_text = client
-        .get(post_url.clone())
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-
-    let needle = r#"<meta property="og:image" content=""#;
-    let start = resp_text.find(needle).ok_or("og:image not found")? + needle.len();
-    let rest = &resp_text[start..];
+const NEEDLE: &str = r#"<meta property="og:image" content=""#;
+fn extract_file_url(body: &str) -> ResultAsyncDyn<String> {
+    let start = body.find(NEEDLE).ok_or("og:image not found")? + NEEDLE.len();
+    let rest = &body[start..];
     let end = rest.find("=s").ok_or("FOUND INVALID OG IMAGE ADDRESS")?;
 
-    // let
+    Ok(format!("{}0", &rest[..(end + 2)]))
+}
 
-    Ok(format!("{}0", &rest[..end + 2]))
+fn prep_link(raw_link: &str) -> ResultAsyncDyn<Url> {
+    let mut link = Url::parse(raw_link)?;
+    link.set_query(None);
+    Ok(link)
+}
+
+async fn file_from_indirect_url_own(
+    indirect_url: String,
+    client: Client,
+    write_dir: std::path::PathBuf,
+) -> ResultAsyncDyn<()> {
+    file_from_indirect_url(&indirect_url, &client, &write_dir).await
+}
+
+async fn file_from_indirect_url(
+    indirect_url: &str,
+    client: &Client,
+    write_dir: &std::path::PathBuf,
+) -> ResultAsyncDyn<()> {
+    let link = prep_link(indirect_url)?;
+    let resp = client.get(link).send().await?;
+
+    let resp_text = resp.text().await?;
+
+    let dirty_img_url = extract_file_url(&resp_text)?;
+    let img_url = prep_link(&dirty_img_url)?;
+
+    let img_response = client.get(img_url).send().await?;
+
+    let filename = format!(
+        "image{}.{}",
+        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"),
+        figure_out_response_file_extension(&img_response.headers())?
+    );
+    let write_parh = write_dir.join(&filename);
+
+    let img_bytes = img_response.bytes().await?;
+    tokio::fs::write(&write_parh, &img_bytes).await?;
+    println!("Записан файл: {}", &filename);
+    
+    Ok(())
+}
+
+fn figure_out_response_file_extension(hv: &header::HeaderMap) -> ResultAsyncDyn<String> {
+    match hv.get(header::CONTENT_TYPE) {
+        Some(t) => match t.to_str()? {
+            "image/jpeg" => Ok("jpeg".to_owned()),
+            "image/gif" => Ok("gif".to_owned()),
+            "image/png" => Ok("png".to_owned()),
+            ut => {
+                return Err(
+                    format!("Ошибка: не предусмотренный тип контента в ответе: {}", ut).into(),
+                );
+            }
+        },
+        None => {
+            return Err(
+                "Ошибка: в ответе от сервера на запрос по прямой ссылке картинки нет контента."
+                    .into(),
+            );
+        }
+    }
+}
+
+fn read_strings() -> ResultAsyncDyn<Vec<String>> {
+    let stdin = std::io::stdin();
+
+    Ok(stdin.lock().lines().collect::<Result<Vec<_>, _>>()?)
+}
+
+fn extract_links(lines: &[String]) -> Vec<String> {
+    lines.iter().filter_map(|line| extract_link(line)).collect()
+}
+
+fn extract_link(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find(|part| part.starts_with("http://") || part.starts_with("https://"))
+        .map(str::to_string)
+}
+
+fn obtain_links() -> ResultAsyncDyn<Vec<String>> {
+    let lines = read_strings()?;
+    Ok(extract_links(&lines))
 }
