@@ -12,12 +12,13 @@ static FILE_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[tokio::main]
 async fn main() -> ResultAsyncDyn<()> {
-
     let client = Client::builder().tls_backend_native().build()?;
     let write_dir = std::path::PathBuf::from("./obtained");
 
+    let links = obtain_links()?;
+    println!("\nВвод обработан, скачивание...");
     let mut handles = Vec::new();
-    for link in obtain_links()? {
+    for link in links {
         handles.push(tokio::spawn({
             file_from_indirect_url_own(link, client.clone(), write_dir.clone())
         }));
@@ -63,7 +64,14 @@ async fn file_from_indirect_url(
 
     let resp_text = resp.text().await?;
 
-    let dirty_img_url = extract_file_url(&resp_text)?;
+    let dirty_img_url = match extract_file_url(&resp_text) {
+        Ok(url) => url,
+        Err(err) => {
+            eprintln!("Пропускаю {indirect_url}: extract_file_url failed: {err}");
+            return Ok(());
+        }
+    };
+    
     let img_url = prep_link(&dirty_img_url)?;
 
     let img_response = client.get(img_url).send().await?;
@@ -79,7 +87,7 @@ async fn file_from_indirect_url(
     let img_bytes = img_response.bytes().await?;
     tokio::fs::write(&write_parh, &img_bytes).await?;
     println!("Записан файл: {}", &filename);
-    
+
     Ok(())
 }
 
