@@ -16,7 +16,7 @@ async fn main() -> ResultAsyncDyn<()> {
     let write_dir = std::path::PathBuf::from("./obtained");
 
     let links = obtain_links()?;
-    println!("\nВвод обработан, скачивание...");
+    println!("Ввод обработан, скачивание...");
     let mut handles = Vec::new();
     for link in links {
         handles.push(tokio::spawn({
@@ -33,10 +33,9 @@ async fn main() -> ResultAsyncDyn<()> {
 
 const NEEDLE: &str = r#"<meta property="og:image" content=""#;
 fn extract_file_url(body: &str) -> ResultAsyncDyn<String> {
-    let start = body.find(NEEDLE).ok_or("og:image not found")? + NEEDLE.len();
+    let start = body.find(NEEDLE).ok_or("original image not found")? + NEEDLE.len();
     let rest = &body[start..];
-    let end = rest.find("=s").ok_or("FOUND INVALID OG IMAGE ADDRESS")?;
-
+    let end = rest.find("=s").ok_or("found invalid original image address")?;
     Ok(format!("{}0", &rest[..(end + 2)]))
 }
 
@@ -146,4 +145,28 @@ fn extract_link(line: &str) -> Option<String> {
 fn obtain_links() -> ResultAsyncDyn<Vec<String>> {
     let lines = read_strings()?;
     Ok(extract_links(&lines))
+}
+
+use std::collections::HashSet;
+use regex::Regex;
+
+fn extract_all_ggpht_urls(body: &str) -> Vec<String> {
+    let re = Regex::new(r#"https://yt3\.ggpht\.com/[^"'<>\s\\=]+"#).unwrap();
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for m in re.find_iter(body) {
+        let mut url = m.as_str().to_string();
+
+        // если URL в JSON/JS, иногда встречаются экранирования
+        url = url.replace("\\u0026", "&");
+        url = url.replace("\\/", "/");
+
+        if seen.insert(url.clone()) {
+            out.push(url);
+        }
+    }
+
+    out
 }
