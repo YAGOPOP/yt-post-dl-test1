@@ -1,9 +1,9 @@
+use chrono;
+use regex::Regex;
+use reqwest::{Client, header};
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::sync::atomic::{AtomicUsize, Ordering};
-// use std::str::FromStr;
-use chrono;
-
-use reqwest::{Client, header};
 use url::Url;
 
 type ResultAsyncDyn<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -31,14 +31,6 @@ async fn main() -> ResultAsyncDyn<()> {
     Ok(())
 }
 
-const NEEDLE: &str = r#"<meta property="og:image" content=""#;
-fn extract_file_url(body: &str) -> ResultAsyncDyn<String> {
-    let start = body.find(NEEDLE).ok_or("original image not found")? + NEEDLE.len();
-    let rest = &body[start..];
-    let end = rest.find("=s").ok_or("found invalid original image address")?;
-    Ok(format!("{}0", &rest[..(end + 2)]))
-}
-
 fn prep_link(raw_link: &str) -> ResultAsyncDyn<Url> {
     let mut link = Url::parse(raw_link)?;
     link.set_query(None);
@@ -63,17 +55,28 @@ async fn file_from_indirect_url(
 
     let resp_text = resp.text().await?;
 
-    let dirty_img_url = match extract_file_url(&resp_text) {
-        Ok(url) => url,
+    let img_urls = extract_all_ggpht_urls(&resp_text);
+
+    for img_url in img_urls {
+        println!("Скачивается: {}", &img_url);
+        file_from_url(&img_url, &client, &write_dir).await?
+    }
+
+    Ok(())
+}
+
+async fn file_from_url(
+    img_url: &str,
+    client: &Client,
+    write_dir: &std::path::PathBuf,
+) -> ResultAsyncDyn<()> {
+    let img_response = match client.get(img_url).send().await {
+        Ok(r) => r,
         Err(err) => {
-            eprintln!("Пропускаю {indirect_url}: extract_file_url failed: {err}");
+            eprintln!("Пропускаю {img_url}: extract_file_url failed: {err}");
             return Ok(());
         }
     };
-
-    let img_url = prep_link(&dirty_img_url)?;
-
-    let img_response = client.get(img_url).send().await?;
 
     let filename = format!(
         "image-{}-{}.{}",
@@ -81,9 +84,10 @@ async fn file_from_indirect_url(
         chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"),
         figure_out_response_file_extension(&img_response.headers())?
     );
-    let write_parh = write_dir.join(&filename);
 
     let img_bytes = img_response.bytes().await?;
+
+    let write_parh = write_dir.join(&filename);
     tokio::fs::write(&write_parh, &img_bytes).await?;
     println!("Записан файл: {}", &filename);
 
@@ -147,25 +151,13 @@ fn obtain_links() -> ResultAsyncDyn<Vec<String>> {
     Ok(extract_links(&lines))
 }
 
-use std::collections::HashSet;
-use regex::Regex;
+fn extract_all_ggpht_urls(body: &str) -> HashSet<String> {
+    let re = Regex::new(r#"https://yt3\.ggpht\.com/[^"'<>\s\\=]+="#).unwrap();
 
-fn extract_all_ggpht_urls(body: &str) -> Vec<String> {
-    let re = Regex::new(r#"https://yt3\.ggpht\.com/[^"'<>\s\\=]+"#).unwrap();
-
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-
+    let mut out = HashSet::new();
     for m in re.find_iter(body) {
-        let mut url = m.as_str().to_string();
-
-        // если URL в JSON/JS, иногда встречаются экранирования
-        url = url.replace("\\u0026", "&");
-        url = url.replace("\\/", "/");
-
-        if seen.insert(url.clone()) {
-            out.push(url);
-        }
+        let url = format!("{}s0", m.as_str());
+        out.insert(url);
     }
 
     out
