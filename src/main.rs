@@ -4,7 +4,7 @@ use clap::{Parser, ValueEnum};
 use linkify::{LinkFinder, LinkKind};
 use reqwest::{Client, header};
 use std::collections::HashSet;
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncWriteExt;
@@ -15,23 +15,26 @@ type ResultAsyncDyn<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 static FILE_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(version, about = "Скачиватель медиа из постов в сообществе YouTube.", long_about = "По умолчанию возьмёт содержимое из буфера обмена, и ,если это текст, извлечёт оттуда все ссылки на посты в сообществе YouTube и из каждого поста скачает все png/gif/jpeg.")]
 struct Cli {
+    /// Каталог, куда сохранять результат, если не существует, будет попытка создания
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    #[arg(short, long, value_enum, conflicts_with = "link")]
+    /// Источник ввода терминал (t) или буфер обмена (c)
+    #[arg(short, long, value_enum)]
     input: Option<InputSource>,
 
-    #[arg(short, long)]
-    link: Option<String>,
+    // , conflicts_with = "link"
+    // #[arg(short, long)]
+    // link: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum InputSource {
-    #[value(name = "t")]
+    #[value(name = "t", alias = "terminal")]
     Terminal,
-    #[value(name = "c")]
+    #[value(name = "c", alias = "clipboard")]
     Clipboard,
 }
 
@@ -44,11 +47,12 @@ async fn main() -> ResultAsyncDyn<()> {
         None => PathBuf::from("./obtained"),
     };
     match std::fs::create_dir(&write_dir) {
-        Ok(()) => println!("Создана директория: {}", write_dir.display()),
+        Ok(()) => println!("Создана директория для записи: {}", write_dir.canonicalize()?.display()),
         Err(e) => {
             if !write_dir.is_dir() {
                 return Err(format!("{} - не является каталогом.", write_dir.display()).into());
             } else if write_dir.exists() {
+                println!("Файлы будут записаны в существующую директорию: {}", write_dir.canonicalize()?.display());
             } else {
                 return Err(e.into());
             }
@@ -63,6 +67,8 @@ async fn main() -> ResultAsyncDyn<()> {
     let links = extract_links(&link_source, sanitize_yt_post_url);
 
     run(write_dir, links).await?;
+
+    exit_on_enter_pressed();
     Ok(())
 }
 
@@ -158,7 +164,6 @@ fn figure_out_response_file_extension(hv: &header::HeaderMap) -> ResultAsyncDyn<
     }
 }
 
-#[allow(unused)]
 fn read_strings_from_terminal() -> Result<String, std::io::Error> {
     let stdin = std::io::stdin();
     let mut result = String::new();
@@ -228,4 +233,11 @@ fn read_strings_from_clipboard() -> Result<String, arboard::Error> {
     let text = clpbrd.get_text()?;
     println!("Прочитан текст из буфера обмена:\n{}\n", &text);
     Ok(text)
+}
+
+fn exit_on_enter_pressed() {
+    print!("\nНажмите Enter, чтобы выйти...");
+    {std::io::stdout().flush().unwrap();}
+    let mut buf = String::new();
+    {std::io::stdin().read_line(&mut buf).unwrap();}
 }
